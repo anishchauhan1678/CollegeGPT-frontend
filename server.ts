@@ -11,10 +11,12 @@ dotenv.config();
 // 🤖 CUSTOM AI CHAT MODEL INTEGRATION CONFIGURATION
 // Edit these three fields to easily connect your custom AI provider (DeepSeek, OpenAI, etc.)
 // ============================================================================
+const DEFAULT_AI_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+
 const CUSTOM_AI_CONFIG = {
-  MODEL_NAME: "nvidia/nemotron-3-ultra-550b-a55b:free", // E.g., "deepseek-chat", "gpt-4o", "meta-llama/llama-3.1-405b-instruct"
-  API_KEY: process.env.GEMINI_API_KEY || "", // E.g., your Gemini API Key or third-party key
-  BASE_URL: "", // E.g., "https://api.deepseek.com/v1", "https://openrouter.ai/api/v1" or leave blank for Google Gemini
+  MODEL_NAME: DEFAULT_AI_MODEL, // E.g., "deepseek-chat", "gpt-4o", "meta-llama/llama-3.1-405b-instruct"
+  API_KEY: process.env.OPENROUTER_API_KEY || "", // E.g., your Gemini API Key or third-party key
+  BASE_URL: "https://openrouter.ai/api/v1", // E.g., "https://api.deepseek.com/v1", "https://openrouter.ai/api/v1" or leave blank for Google Gemini
 };
 
 // Initialize NVIDIA NIM API client (Direct integration)
@@ -55,7 +57,7 @@ function getAiClient(): GoogleGenAI {
   if (!aiClient) {
     const activeKey = CUSTOM_AI_CONFIG.API_KEY || apiKey;
     if (!activeKey && !openRouterKey && !nvidiaApiKey) {
-      console.warn("WARNING: Neither CUSTOM_AI_CONFIG.API_KEY nor GEMINI_API_KEY is set. AI features will fallback to smart template responses.");
+      console.warn("WARNING: Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set. AI features will fallback to smart template responses.");
     }
     aiClient = new GoogleGenAI({
       apiKey: activeKey || "MOCK_KEY",
@@ -74,12 +76,15 @@ async function generateAIContent(options: {
   systemInstruction?: string;
   contents: string | any[];
   responseMimeType?: string;
+  model?: string;
+  provider?: string;
 }): Promise<string> {
   // 1. Check if user configured a Custom AI Provider with a custom BASE_URL
+  const preferredModel = options.model || DEFAULT_AI_MODEL;
   const customApiKey = CUSTOM_AI_CONFIG.API_KEY || process.env.GEMINI_API_KEY || apiKey;
-  if (CUSTOM_AI_CONFIG.BASE_URL && customApiKey) {
+  if (CUSTOM_AI_CONFIG.BASE_URL && customApiKey && customApiKey !== "") {
     try {
-      console.log(`Connecting to custom AI provider: ${CUSTOM_AI_CONFIG.BASE_URL} with model: ${CUSTOM_AI_CONFIG.MODEL_NAME}`);
+      console.log(`Connecting to custom AI provider: ${CUSTOM_AI_CONFIG.BASE_URL} with model: ${preferredModel}`);
       const customOpenAI = new OpenAI({
         baseURL: CUSTOM_AI_CONFIG.BASE_URL,
         apiKey: customApiKey,
@@ -108,7 +113,7 @@ async function generateAIContent(options: {
       }
 
       const params: any = {
-        model: CUSTOM_AI_CONFIG.MODEL_NAME,
+        model: preferredModel,
         messages: messages,
         temperature: 0.7,
       };
@@ -130,8 +135,8 @@ async function generateAIContent(options: {
     try {
       const messages: any[] = [];
       const baseSystem = "You are the advanced NVIDIA Nemotron-3 Ultra 550B model developed by NVIDIA. Deliver highly accurate, high-performance structured answers.";
-      const fullSystem = options.systemInstruction 
-        ? `${baseSystem}\n\n${options.systemInstruction}` 
+      const fullSystem = options.systemInstruction
+        ? `${baseSystem}\n\n${options.systemInstruction}`
         : baseSystem;
 
       messages.push({
@@ -192,7 +197,7 @@ async function generateAIContent(options: {
       }
 
       const completion = await openRouter.chat.completions.create({
-        model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+        model: preferredModel,
         messages: messages,
         extra_body: {
           reasoning: {
@@ -209,17 +214,17 @@ async function generateAIContent(options: {
 
   // 4. Default / Fallback to Google Gemini API (supporting custom keys if set)
   const gemini = getAiClient();
-  const contentsParam = typeof options.contents === "string" 
-    ? [{ role: "user", parts: [{ text: options.contents }] }] 
+  const contentsParam = typeof options.contents === "string"
+    ? [{ role: "user", parts: [{ text: options.contents }] }]
     : options.contents;
 
   const baseEmulationPrompt = "You are the XYZ CollegeGPT engine. Emulate CollegeGPT's conversational tone, intelligence, and structures perfectly. Always refer to yourself as Powered by CollegeGPT AI Core.";
-  const combinedSystem = options.systemInstruction 
-    ? `${baseEmulationPrompt}\n\n${options.systemInstruction}` 
+  const combinedSystem = options.systemInstruction
+    ? `${baseEmulationPrompt}\n\n${options.systemInstruction}`
     : baseEmulationPrompt;
 
-  const targetModel = (CUSTOM_AI_CONFIG.MODEL_NAME && !CUSTOM_AI_CONFIG.BASE_URL) 
-    ? CUSTOM_AI_CONFIG.MODEL_NAME 
+  const targetModel = (CUSTOM_AI_CONFIG.MODEL_NAME && !CUSTOM_AI_CONFIG.BASE_URL)
+    ? CUSTOM_AI_CONFIG.MODEL_NAME
     : "gemini-3.5-flash";
 
   const response = await gemini.models.generateContent({
@@ -250,7 +255,7 @@ app.get("/api/health", (req: Request, res: Response) => {
  */
 app.post("/api/chat", async (req: Request, res: Response) => {
   try {
-    const { message, history = [], category = "general" } = req.body;
+    const { message, history = [], category = "general", model = DEFAULT_AI_MODEL, provider = "openrouter", stream = false } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: "Message is required." });
@@ -403,18 +408,69 @@ I am ready to assist you. Ask me anything about your syllabus, exams, assignment
       });
     }
 
+    if (stream && openRouterKey) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      const openRouter = getOpenRouterClient();
+      if (!openRouter) {
+        res.write("event: error\ndata: {\"error\":\"OpenRouter client is unavailable.\"}\n\n");
+        res.end();
+        return;
+      }
+
+      const streamMessages: any[] = [
+        { role: "system", content: systemInstruction },
+        ...history
+          .filter((h: any) => h && h.text)
+          .map((h: any) => ({
+            role: h.sender === "user" ? "user" : "assistant",
+            content: h.text
+          })),
+        { role: "user", content: message }
+      ];
+
+      let streamedText = "";
+      const completion = await openRouter.chat.completions.create({
+        model: model || DEFAULT_AI_MODEL,
+        messages: streamMessages,
+        stream: true,
+        extra_body: {
+          reasoning: {
+            enabled: true
+          }
+        }
+      } as any);
+
+      const completionStream = completion as unknown as AsyncIterable<any>;
+      for await (const chunk of completionStream) {
+        const delta = chunk?.choices?.[0]?.delta?.content || "";
+        if (!delta) continue;
+        streamedText += delta;
+        res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
+      }
+
+      res.write(`data: ${JSON.stringify({ done: true, text: streamedText })}\n\n`);
+      res.end();
+      return;
+    }
+
     const responseText = await generateAIContent({
       systemInstruction,
-      contents: chatContents
+      contents: chatContents,
+      model,
+      provider
     });
 
     res.json({ text: responseText || "I was unable to synthesize a response. Please try again." });
 
   } catch (error: any) {
     console.error("AI Generation Error in /api/chat:", error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: "AI Generation failed. Please verify your internet connection or API secrets.",
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -489,9 +545,9 @@ app.post("/api/upload-pdf", async (req: Request, res: Response) => {
 
   } catch (error: any) {
     console.error("PDF Analytics Error:", error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Failed to perform AI analysis on the document.",
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -546,15 +602,15 @@ Return EXACTLY a JSON payload with this schema (no other text, no markdown backt
         const nameParts = s.name.toLowerCase().split(" ");
         const firstName = nameParts[0];
         const lastName = nameParts[nameParts.length - 1];
-        const matchesName = lowerText.includes(s.name.toLowerCase()) || 
-                            lowerText.includes(firstName) || 
-                            lowerText.includes(s.roll.toLowerCase());
+        const matchesName = lowerText.includes(s.name.toLowerCase()) ||
+          lowerText.includes(firstName) ||
+          lowerText.includes(s.roll.toLowerCase());
 
         if (matchesName) {
           // Determine status based on absent-keywords near the name/roll
           let status: "present" | "absent" = "present";
           const absentKeywords = ["absent", "missed", "not here", "skipped", "late", "away", "sick"];
-          
+
           // Check if any absent keyword is close to the student's name in the text
           for (const key of absentKeywords) {
             if (lowerText.includes(key)) {
@@ -602,9 +658,9 @@ Return EXACTLY a JSON payload with this schema (no other text, no markdown backt
 
   } catch (error: any) {
     console.error("AI Attendance Error:", error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Failed to parse attendance using Mr.Anish Generative Panda Ai AI Bot.",
-      details: error.message 
+      details: error.message
     });
   }
 });
